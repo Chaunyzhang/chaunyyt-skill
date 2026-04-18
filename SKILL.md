@@ -115,7 +115,9 @@ This lets the skill:
 - download the video or audio locally
 - fetch subtitle files when available
 - extract transcript text from subtitles first
-- fall back to local audio transcription with `faster-whisper`
+- try DashScope URL-based transcription with audio URL first
+- then try DashScope URL-based transcription with video URL
+- then fall back to local audio or local video plus DashScope recognition if URL attempts fail
 
 If YouTube asks you to sign in during download or subtitle extraction, set:
 
@@ -124,6 +126,12 @@ $env:YT_DLP_COOKIES_FROM_BROWSER="chrome"
 ```
 
 The downloader will also try to use local `node` as a JavaScript runtime for `yt-dlp` when available.
+
+For transcript extraction without subtitles, set:
+
+```powershell
+$env:DASHSCOPE_API_KEY="..."
+```
 
 ## Config Notes
 

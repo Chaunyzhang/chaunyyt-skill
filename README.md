@@ -26,7 +26,7 @@
 | 视频下载 | ✅ | 通过 `yt-dlp` 下载视频 |
 | 音频下载 | ✅ | 通过 `yt-dlp` 下载音频 |
 | 字幕提取 | ✅ | 优先下载官方/自动字幕 |
-| 文案提取 | ✅ | 优先从字幕转文本，失败时回退 `faster-whisper` |
+| 文案提取 | ✅ | 优先字幕，其次音频 URL、视频 URL，最后本地媒体 + DashScope |
 | xAI 摘要预留 | ✅ | 配置层已预留 |
 | 热门榜专用模式 | ❌ | 当前以频道/搜索为主 |
 
@@ -87,14 +87,14 @@ python scripts/youtube_monitor_cli.py transcribe "<youtube_url>"
 - ✅ 搜索只做发现，不要高频跑
 - ✅ 先用 `run --once` 测试
 - ✅ 真正重要的视频再下载/转写
-- ✅ 优先先试字幕，再回退音频转写
+- ✅ 优先先试字幕，再试音频 URL / 视频 URL，最后再回退本地媒体 + DashScope
 - ✅ 如果 YouTube 要求登录确认不是 bot，设置 `YT_DLP_COOKIES_FROM_BROWSER=chrome` 或 `edge`
 
 ## 当前限制
 
 - ❌ 不做实时热门榜
 - ❌ 依赖本机存在 `yt-dlp`、`ffmpeg`
-- ❌ 音频转写依赖 `faster-whisper`
+- ❌ 音频转写依赖 `DASHSCOPE_API_KEY`
 
 ## 仓库定位
 

@@ -9,10 +9,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from http import HTTPStatus
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+import dashscope
+from dashscope.audio.asr import Recognition, Transcription
 
 
 DEFAULT_CONFIG = {
@@ -222,6 +226,44 @@ def yt_dlp_base_args() -> List[str]:
     return args
 
 
+def ensure_dashscope_api_key() -> None:
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing DASHSCOPE_API_KEY in environment.")
+    dashscope.api_key = api_key
+    dashscope.base_http_api_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+
+
+def wait_for_paraformer_result(task_id: str) -> Dict[str, Any]:
+    response = Transcription.wait(task=task_id)
+    if response.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"DashScope transcription failed: {response}")
+    results: List[Dict[str, Any]] = []
+    for item in response.output.get("results", []):
+        if item.get("subtask_status") != "SUCCEEDED":
+            results.append(
+                {
+                    "status": item.get("subtask_status", "UNKNOWN"),
+                    "file_url": item.get("file_url", ""),
+                }
+            )
+            continue
+        transcription_url = item.get("transcription_url")
+        result = json.loads(urllib.request.urlopen(transcription_url).read().decode("utf-8"))
+        results.append(result)
+    return {"task_id": task_id, "results": results}
+
+
+def transcribe_remote_url(file_url: str, language_hints: Optional[List[str]] = None) -> Dict[str, Any]:
+    ensure_dashscope_api_key()
+    task_response = Transcription.async_call(
+        model="paraformer-v2",
+        file_urls=[file_url],
+        language_hints=language_hints or None,
+    )
+    return wait_for_paraformer_result(task_response.output.task_id)
+
+
 def download_video(url_or_id: str, output_dir: Path, media_kind: str = "video") -> Dict[str, Any]:
     yt_dlp = ensure_binary("yt-dlp")
     ffmpeg = ensure_binary("ffmpeg")
@@ -278,6 +320,62 @@ def download_video(url_or_id: str, output_dir: Path, media_kind: str = "video") 
     }
 
 
+def normalize_local_audio(input_path: Path, work_dir: Path) -> Path:
+    ffmpeg = ensure_binary("ffmpeg")
+    audio_path = work_dir / f"{input_path.stem}.wav"
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        str(audio_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0 or not audio_path.exists():
+        raise RuntimeError(result.stderr or result.stdout or "ffmpeg failed to normalize local audio.")
+    return audio_path
+
+
+def transcribe_local_audio(audio_path: Path) -> Dict[str, Any]:
+    ensure_dashscope_api_key()
+    recognition = Recognition(
+        model="paraformer-realtime-v2",
+        format="wav",
+        sample_rate=16000,
+        callback=None,
+    )
+    response = recognition.call(str(audio_path))
+    if response.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"DashScope recognition failed: {response}")
+
+    sentences: List[Dict[str, Any]] = []
+    transcript_lines: List[str] = []
+    try:
+        sentences = response.get_sentence() or []
+    except Exception:
+        sentences = []
+    for item in sentences:
+        if isinstance(item, dict) and item.get("text"):
+            transcript_lines.append(str(item["text"]).strip())
+    if not transcript_lines and hasattr(response, "output") and isinstance(response.output, dict):
+        maybe_text = response.output.get("transcript") or response.output.get("text")
+        if maybe_text:
+            transcript_lines.append(str(maybe_text).strip())
+    return {
+        "provider": "dashscope",
+        "model": "paraformer-realtime-v2",
+        "sentences": sentences,
+        "text": "\n".join(line for line in transcript_lines if line),
+    }
+
+
 def download_subtitles(url_or_id: str, output_dir: Path, languages: Optional[List[str]] = None) -> Dict[str, Any]:
     yt_dlp = ensure_binary("yt-dlp")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -318,6 +416,40 @@ def download_subtitles(url_or_id: str, output_dir: Path, languages: Optional[Lis
     }
 
 
+def extract_media_urls(url_or_id: str) -> Dict[str, Any]:
+    yt_dlp = ensure_binary("yt-dlp")
+    video_url = normalize_video_url(url_or_id)
+    try:
+        result = run_command([yt_dlp, *yt_dlp_base_args(), "--dump-single-json", video_url])
+    except subprocess.CalledProcessError as exc:
+        return {
+            "success": False,
+            "message": "yt-dlp failed while extracting media URLs",
+            "stderr": exc.stderr,
+            "hint": "If YouTube asks you to sign in, set YT_DLP_COOKIES_FROM_BROWSER to your browser name, for example chrome or edge.",
+        }
+    payload = json.loads(result.stdout)
+    audio_url = None
+    video_stream_url = None
+    direct_url = payload.get("url")
+    formats = payload.get("formats") or []
+    for fmt in formats:
+        vcodec = fmt.get("vcodec")
+        acodec = fmt.get("acodec")
+        if acodec and acodec != "none" and (vcodec == "none" or not vcodec) and not audio_url:
+            audio_url = fmt.get("url")
+        if vcodec and vcodec != "none" and (acodec == "none" or not acodec) and not video_stream_url:
+            video_stream_url = fmt.get("url")
+    return {
+        "success": True,
+        "video_id": payload.get("id") or extract_video_id(url_or_id),
+        "audio_url": audio_url,
+        "video_url": video_stream_url or direct_url,
+        "webpage_url": payload.get("webpage_url") or video_url,
+        "title": payload.get("title"),
+    }
+
+
 def vtt_to_plain_text(vtt_path: Path) -> str:
     lines: List[str] = []
     for raw_line in vtt_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -352,29 +484,107 @@ def transcribe_video(url_or_id: str, output_dir: Path, *, prefer_subtitles: bool
             }
     else:
         subtitle_error = {}
+    media_urls = extract_media_urls(url_or_id)
+    if not media_urls.get("success"):
+        media_urls.update(subtitle_error)
+        media_urls["video_id"] = video_id
+        return media_urls
 
-    audio_dir = output_dir / "audio-cache"
-    audio_result = download_video(url_or_id, audio_dir, media_kind="audio")
-    if not audio_result.get("success"):
-        audio_result.update(subtitle_error)
-        return audio_result
-    try:
-        from faster_whisper import WhisperModel  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("faster_whisper is required for audio transcription") from exc
+    attempts: List[Dict[str, Any]] = []
+    for method_name, media_url in (("audio_url", media_urls.get("audio_url")), ("video_url", media_urls.get("video_url"))):
+        if not media_url:
+            continue
+        try:
+            result = transcribe_remote_url(str(media_url))
+            transcript_path = output_dir / f"{video_id}.{method_name}.json"
+            transcript_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return {
+                "success": True,
+                "video_id": video_id,
+                "method": f"dashscope-{method_name}",
+                "provider": "dashscope",
+                "model": "paraformer-v2",
+                "remote_url": media_url,
+                "transcript_path": str(transcript_path),
+                "result": result,
+                **subtitle_error,
+            }
+        except Exception as exc:  # noqa: BLE001
+            attempts.append({"method": method_name, "remote_url": media_url, "error": str(exc)})
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(audio_result["filepath"], vad_filter=True)
-    transcript_text = "\n".join(segment.text.strip() for segment in segments if segment.text.strip())
-    transcript_path = output_dir / f"{video_id}.whisper.txt"
-    transcript_path.write_text(transcript_text + "\n", encoding="utf-8")
+    audio_download = download_video(url_or_id, output_dir / "download-fallbacks", media_kind="audio")
+    if audio_download.get("success"):
+        try:
+            normalized_audio = normalize_local_audio(Path(audio_download["filepath"]), output_dir / "audio-normalized")
+            local_result = transcribe_local_audio(normalized_audio)
+            transcript_path = output_dir / f"{video_id}.local-audio.json"
+            transcript_path.write_text(json.dumps(local_result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return {
+                "success": True,
+                "video_id": video_id,
+                "method": "dashscope-local-audio",
+                "audio_path": audio_download["filepath"],
+                "normalized_audio_path": str(normalized_audio),
+                "transcript_path": str(transcript_path),
+                "result": local_result,
+                **subtitle_error,
+            }
+        except Exception as exc:  # noqa: BLE001
+            attempts.append(
+                {
+                    "method": "local_audio",
+                    "audio_path": audio_download.get("filepath"),
+                    "error": str(exc),
+                }
+            )
+    else:
+        attempts.append(
+            {
+                "method": "local_audio_download",
+                "error": audio_download.get("message"),
+                "stderr": audio_download.get("stderr"),
+            }
+        )
+
+    video_download = download_video(url_or_id, output_dir / "download-fallbacks", media_kind="video")
+    if video_download.get("success"):
+        try:
+            normalized_audio = normalize_local_audio(Path(video_download["filepath"]), output_dir / "audio-normalized")
+            local_result = transcribe_local_audio(normalized_audio)
+            transcript_path = output_dir / f"{video_id}.local-video.json"
+            transcript_path.write_text(json.dumps(local_result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return {
+                "success": True,
+                "video_id": video_id,
+                "method": "dashscope-local-video",
+                "video_path": video_download["filepath"],
+                "normalized_audio_path": str(normalized_audio),
+                "transcript_path": str(transcript_path),
+                "result": local_result,
+                **subtitle_error,
+            }
+        except Exception as exc:  # noqa: BLE001
+            attempts.append(
+                {
+                    "method": "local_video",
+                    "video_path": video_download.get("filepath"),
+                    "error": str(exc),
+                }
+            )
+    else:
+        attempts.append(
+            {
+                "method": "local_video_download",
+                "error": video_download.get("message"),
+                "stderr": video_download.get("stderr"),
+            }
+        )
+
     return {
-        "success": True,
+        "success": False,
         "video_id": video_id,
-        "method": "whisper",
-        "audio_path": audio_result["filepath"],
-        "transcript_path": str(transcript_path),
-        "language": getattr(info, "language", None),
+        "message": "All transcript attempts failed",
+        "attempts": attempts,
         **subtitle_error,
     }
 
