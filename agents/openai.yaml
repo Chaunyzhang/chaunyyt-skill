@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chauny YT Skill"
+  short_description: "Track YouTube channels and searches."
+  default_prompt: "Monitor selected YouTube channels and keyword searches, detect new videos, summarize the important ones, and write a concise report."

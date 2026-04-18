@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+chaunyyt-output/
+chaunyyt-mrbeast-output/
+youtube-monitor-output/
+*.log
+tmp-*.json
+executor-*.json
