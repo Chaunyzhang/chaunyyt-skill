@@ -100,6 +100,31 @@ Recommended production shape:
 - search cooldowns should usually be 6 to 24 hours
 - keep state and reports in the configured output directory
 
+## Media Follow-up
+
+When a monitored video matters, continue with:
+
+```powershell
+python scripts/youtube_monitor_cli.py download "<youtube_url>"
+python scripts/youtube_monitor_cli.py subtitles "<youtube_url>"
+python scripts/youtube_monitor_cli.py transcribe "<youtube_url>"
+```
+
+This lets the skill:
+
+- download the video or audio locally
+- fetch subtitle files when available
+- extract transcript text from subtitles first
+- fall back to local audio transcription with `faster-whisper`
+
+If YouTube asks you to sign in during download or subtitle extraction, set:
+
+```powershell
+$env:YT_DLP_COOKIES_FROM_BROWSER="chrome"
+```
+
+The downloader will also try to use local `node` as a JavaScript runtime for `yt-dlp` when available.
+
 ## Config Notes
 
 Three supported collection paths:

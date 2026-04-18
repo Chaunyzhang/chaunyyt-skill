@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+import youtube_monitor_core
 from youtube_monitor_core import MonitorEngine, json_dump, run_loop, write_default_config
 
 
@@ -33,10 +35,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override polling interval for loop mode",
     )
+
+    download_parser = subparsers.add_parser("download", help="Download a YouTube video or audio")
+    download_parser.add_argument("url_or_id", help="YouTube video URL or video ID")
+    download_parser.add_argument("--audio", action="store_true", help="Download audio only as mp3")
+
+    subtitles_parser = subparsers.add_parser("subtitles", help="Download subtitle files when available")
+    subtitles_parser.add_argument("url_or_id", help="YouTube video URL or video ID")
+
+    transcribe_parser = subparsers.add_parser("transcribe", help="Extract text from subtitles or audio")
+    transcribe_parser.add_argument("url_or_id", help="YouTube video URL or video ID")
+    transcribe_parser.add_argument("--no-subs", action="store_true", help="Skip subtitle attempt and transcribe from audio")
+    transcribe_parser.add_argument("--model-size", default="small", help="faster-whisper model size")
     return parser
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = build_parser()
     args = parser.parse_args()
     config_override = getattr(args, "force_path", None)
@@ -68,6 +84,34 @@ def main() -> int:
                 return 2
             return 0 if result.get("success") else 1
         return run_loop(config_path, interval_seconds=args.interval_seconds)
+
+    try:
+        if args.command == "download":
+            result = youtube_monitor_core.download_video(
+                args.url_or_id,
+                engine.paths["downloads_dir"],
+                media_kind="audio" if args.audio else "video",
+            )
+            print_json(result)
+            return 0 if result.get("success") else 1
+
+        if args.command == "subtitles":
+            result = youtube_monitor_core.download_subtitles(args.url_or_id, engine.paths["subtitles_dir"])
+            print_json(result)
+            return 0 if result.get("success") else 1
+
+        if args.command == "transcribe":
+            result = youtube_monitor_core.transcribe_video(
+                args.url_or_id,
+                engine.paths["transcripts_dir"],
+                prefer_subtitles=not args.no_subs,
+                model_size=args.model_size,
+            )
+            print_json(result)
+            return 0 if result.get("success") else 1
+    except Exception as exc:  # noqa: BLE001
+        print_json({"success": False, "message": str(exc)})
+        return 1
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

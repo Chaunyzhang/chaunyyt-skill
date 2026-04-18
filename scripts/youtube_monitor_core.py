@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -125,13 +127,19 @@ def ensure_runtime_paths(output_dir: Path) -> Dict[str, Path]:
     state_dir = output_dir / "state"
     reports_dir = output_dir / "reports"
     events_dir = output_dir / "events"
-    for path in (state_dir, reports_dir, events_dir):
+    downloads_dir = output_dir / "downloads"
+    subtitles_dir = output_dir / "subtitles"
+    transcripts_dir = output_dir / "transcripts"
+    for path in (state_dir, reports_dir, events_dir, downloads_dir, subtitles_dir, transcripts_dir):
         path.mkdir(parents=True, exist_ok=True)
     return {
         "output_dir": output_dir,
         "state": state_dir / "state.json",
         "events": events_dir / "events.jsonl",
         "report": reports_dir / "latest-report.md",
+        "downloads_dir": downloads_dir,
+        "subtitles_dir": subtitles_dir,
+        "transcripts_dir": transcripts_dir,
     }
 
 
@@ -169,6 +177,206 @@ def save_state(state_path: Path, state: Dict[str, Any]) -> None:
 
 def normalize_seen_key(source_id: str, item_id: str) -> str:
     return f"youtube:{source_id}:{item_id}"
+
+
+def ensure_binary(name: str) -> str:
+    resolved = shutil.which(name)
+    if not resolved:
+        raise RuntimeError(f"Required binary not found in PATH: {name}")
+    return resolved
+
+
+def run_command(args: List[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def extract_video_id(url_or_id: str) -> str:
+    if "youtube.com" not in url_or_id and "youtu.be" not in url_or_id:
+        return url_or_id.strip()
+    parsed = urllib.parse.urlparse(url_or_id)
+    if parsed.netloc.endswith("youtu.be"):
+        return parsed.path.lstrip("/")
+    query = urllib.parse.parse_qs(parsed.query)
+    if query.get("v"):
+        return query["v"][0]
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "shorts" in path_parts:
+        idx = path_parts.index("shorts")
+        if idx + 1 < len(path_parts):
+            return path_parts[idx + 1]
+    raise ValueError(f"Unable to extract YouTube video id from: {url_or_id}")
+
+
+def normalize_video_url(url_or_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={extract_video_id(url_or_id)}"
+
+
+def yt_dlp_base_args() -> List[str]:
+    args: List[str] = []
+    node = shutil.which("node")
+    if node:
+        args.extend(["--js-runtimes", f"node:{node}"])
+    browser = os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "").strip()
+    if browser:
+        args.extend(["--cookies-from-browser", browser])
+    return args
+
+
+def download_video(url_or_id: str, output_dir: Path, media_kind: str = "video") -> Dict[str, Any]:
+    yt_dlp = ensure_binary("yt-dlp")
+    ffmpeg = ensure_binary("ffmpeg")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video_url = normalize_video_url(url_or_id)
+    video_id = extract_video_id(url_or_id)
+    template = str(output_dir / f"{video_id}.%(ext)s")
+    if media_kind == "audio":
+        args = [
+            yt_dlp,
+            *yt_dlp_base_args(),
+            "--ffmpeg-location",
+            ffmpeg,
+            "--extract-audio",
+            "--audio-format",
+            "mp3",
+            "--output",
+            template,
+            video_url,
+        ]
+    else:
+        args = [
+            yt_dlp,
+            *yt_dlp_base_args(),
+            "--ffmpeg-location",
+            ffmpeg,
+            "-f",
+            "mp4/bestvideo+bestaudio/best",
+            "--merge-output-format",
+            "mp4",
+            "--output",
+            template,
+            video_url,
+        ]
+    try:
+        run_command(args)
+    except subprocess.CalledProcessError as exc:
+        return {
+            "success": False,
+            "video_id": video_id,
+            "media_kind": media_kind,
+            "message": "yt-dlp failed while downloading media",
+            "stderr": exc.stderr,
+            "hint": "If YouTube asks you to sign in, set YT_DLP_COOKIES_FROM_BROWSER to your browser name, for example chrome or edge.",
+        }
+    matches = sorted(output_dir.glob(f"{video_id}.*"))
+    if not matches:
+        raise RuntimeError(f"Download completed but no output file found for {video_id}")
+    return {
+        "success": True,
+        "video_id": video_id,
+        "media_kind": media_kind,
+        "filepath": str(matches[0]),
+    }
+
+
+def download_subtitles(url_or_id: str, output_dir: Path, languages: Optional[List[str]] = None) -> Dict[str, Any]:
+    yt_dlp = ensure_binary("yt-dlp")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video_url = normalize_video_url(url_or_id)
+    video_id = extract_video_id(url_or_id)
+    lang_spec = ",".join(languages or ["en", "en-US", "zh-Hans", "zh-CN"])
+    template = str(output_dir / f"{video_id}.%(ext)s")
+    args = [
+        yt_dlp,
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-format",
+        "vtt",
+        "--sub-langs",
+        lang_spec,
+        "--output",
+        template,
+        video_url,
+    ]
+    try:
+        run_command([yt_dlp, *yt_dlp_base_args(), *args[1:]])
+    except subprocess.CalledProcessError as exc:
+        return {
+            "success": False,
+            "video_id": video_id,
+            "files": [],
+            "message": "yt-dlp failed while downloading subtitles",
+            "stderr": exc.stderr,
+            "hint": "If YouTube asks you to sign in, set YT_DLP_COOKIES_FROM_BROWSER to your browser name, for example chrome or edge.",
+        }
+    matches = sorted(output_dir.glob(f"{video_id}*.vtt"))
+    return {
+        "success": bool(matches),
+        "video_id": video_id,
+        "files": [str(path) for path in matches],
+        "message": None if matches else "No subtitle files downloaded",
+    }
+
+
+def vtt_to_plain_text(vtt_path: Path) -> str:
+    lines: List[str] = []
+    for raw_line in vtt_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line == "WEBVTT" or "-->" in line or line.isdigit() or line.startswith("NOTE"):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def transcribe_video(url_or_id: str, output_dir: Path, *, prefer_subtitles: bool = True, model_size: str = "small") -> Dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video_id = extract_video_id(url_or_id)
+    if prefer_subtitles:
+        subtitle_result = download_subtitles(url_or_id, output_dir)
+        if not subtitle_result.get("success") and subtitle_result.get("stderr"):
+            subtitle_error = {
+                "subtitle_attempt": subtitle_result,
+            }
+        else:
+            subtitle_error = {}
+        if subtitle_result.get("files"):
+            subtitle_path = Path(subtitle_result["files"][0])
+            transcript_path = output_dir / f"{video_id}.from-subs.txt"
+            transcript_path.write_text(vtt_to_plain_text(subtitle_path) + "\n", encoding="utf-8")
+            return {
+                "success": True,
+                "video_id": video_id,
+                "method": "subtitles",
+                "subtitle_path": str(subtitle_path),
+                "transcript_path": str(transcript_path),
+            }
+    else:
+        subtitle_error = {}
+
+    audio_dir = output_dir / "audio-cache"
+    audio_result = download_video(url_or_id, audio_dir, media_kind="audio")
+    if not audio_result.get("success"):
+        audio_result.update(subtitle_error)
+        return audio_result
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("faster_whisper is required for audio transcription") from exc
+
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    segments, info = model.transcribe(audio_result["filepath"], vad_filter=True)
+    transcript_text = "\n".join(segment.text.strip() for segment in segments if segment.text.strip())
+    transcript_path = output_dir / f"{video_id}.whisper.txt"
+    transcript_path.write_text(transcript_text + "\n", encoding="utf-8")
+    return {
+        "success": True,
+        "video_id": video_id,
+        "method": "whisper",
+        "audio_path": audio_result["filepath"],
+        "transcript_path": str(transcript_path),
+        "language": getattr(info, "language", None),
+        **subtitle_error,
+    }
 
 
 def missing_required_credentials(config: Dict[str, Any]) -> List[Dict[str, str]]:
