@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import youtube_monitor_core
 from youtube_monitor_core import MonitorEngine, json_dump, run_loop, write_default_config
+from playwright.sync_api import sync_playwright
 
 
 def print_json(data):
@@ -47,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     transcribe_parser.add_argument("url_or_id", help="YouTube video URL or video ID")
     transcribe_parser.add_argument("--no-subs", action="store_true", help="Skip subtitle attempt and transcribe from audio")
     transcribe_parser.add_argument("--model-size", default="small", help="faster-whisper model size")
+
+    login_parser = subparsers.add_parser("prepare-login", help="Open a browser so the user can log into YouTube")
+    login_parser.add_argument("--browser", default="chromium", help="Playwright browser type or channel hint")
+    login_parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
+    login_parser.add_argument("--timeout-seconds", type=int, default=300, help="How long to keep the browser window open")
     return parser
 
 
@@ -70,6 +77,33 @@ def main() -> int:
         return 0
 
     engine = MonitorEngine(config_path)
+
+    if args.command == "prepare-login":
+        profile_dir = Path.home() / ".local" / "share" / "chaunyyt-skill" / "browser-profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as p:
+            browser_type = getattr(p, args.browser if args.browser in {"chromium", "firefox", "webkit"} else "chromium")
+            launch_kwargs = {
+                "user_data_dir": str(profile_dir),
+                "headless": args.headless,
+            }
+            if args.browser in {"chrome", "msedge"}:
+                launch_kwargs["channel"] = args.browser
+                browser_type = p.chromium
+            context = browser_type.launch_persistent_context(**launch_kwargs)
+            page = context.new_page()
+            page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=120000)
+            page.wait_for_timeout(5000)
+            time.sleep(max(args.timeout_seconds, 10))
+            context.close()
+        print_json(
+            {
+                "success": True,
+                "message": "Browser session finished. If you logged into YouTube, yt-dlp can try to reuse that browser state next.",
+                "profile_dir": str(profile_dir),
+            }
+        )
+        return 0
 
     if args.command == "check":
         result = engine.check()

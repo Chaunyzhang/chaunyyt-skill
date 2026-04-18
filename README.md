@@ -44,16 +44,18 @@
 | --- | --- | --- |
 | 1 | `init` | 生成配置 |
 | 2 | `check` | 校验配置、凭据、搜索配额估算 |
-| 3 | `run --once` | 拉最新频道视频或搜索结果 |
-| 4 | `download` | 下载视频或音频 |
-| 5 | `subtitles` | 下载字幕文件 |
-| 6 | `transcribe` | 生成文本稿 |
+| 3 | `prepare-login` | 自动打开浏览器让用户登录 YouTube |
+| 4 | `run --once` | 拉最新频道视频或搜索结果 |
+| 5 | `download` | 下载视频或音频 |
+| 6 | `subtitles` | 下载字幕文件 |
+| 7 | `transcribe` | 生成文本稿 |
 
 ## 常用命令
 
 ```powershell
 python scripts/youtube_monitor_cli.py init --config .\youtube-monitor-config.json
 python scripts/youtube_monitor_cli.py check --config .\youtube-monitor-config.json
+python scripts/youtube_monitor_cli.py prepare-login --browser chrome
 python scripts/youtube_monitor_cli.py run --config .\youtube-monitor-config.json --once
 python scripts/youtube_monitor_cli.py download "<youtube_url>"
 python scripts/youtube_monitor_cli.py download "<youtube_url>" --audio
@@ -88,7 +90,7 @@ python scripts/youtube_monitor_cli.py transcribe "<youtube_url>"
 - ✅ 先用 `run --once` 测试
 - ✅ 真正重要的视频再下载/转写
 - ✅ 优先先试字幕，再试音频 URL / 视频 URL，最后再回退本地媒体 + DashScope
-- ✅ 如果 YouTube 要求登录确认不是 bot，设置 `YT_DLP_COOKIES_FROM_BROWSER=chrome` 或 `edge`
+- ✅ 如果 YouTube 要求登录确认不是 bot，先跑 `prepare-login`，再设置 `YT_DLP_COOKIES_FROM_BROWSER=chrome` 或 `edge`
 
 ## 当前限制
 

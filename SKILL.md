@@ -12,6 +12,7 @@ Always initialize or inspect the watchlist config before running a monitor cycle
 ```powershell
 python scripts/youtube_monitor_cli.py init
 python scripts/youtube_monitor_cli.py check
+python scripts/youtube_monitor_cli.py prepare-login --browser chrome
 ```
 
 Do not start a long-running monitor before `check` succeeds.
@@ -126,6 +127,7 @@ $env:YT_DLP_COOKIES_FROM_BROWSER="chrome"
 ```
 
 The downloader will also try to use local `node` as a JavaScript runtime for `yt-dlp` when available.
+In real use, run `prepare-login` first so the agent opens YouTube for interactive login and later media steps can try to reuse that browser state.
 
 For transcript extraction without subtitles, set:
 
