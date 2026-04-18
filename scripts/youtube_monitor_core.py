@@ -460,6 +460,32 @@ def vtt_to_plain_text(vtt_path: Path) -> str:
     return "\n".join(lines)
 
 
+def vtt_text_from_url(url: str) -> Dict[str, Any]:
+    text = http_text(url)
+    temp_lines: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line == "WEBVTT" or "-->" in line or line.isdigit() or line.startswith("NOTE"):
+            continue
+        temp_lines.append(line)
+    return {
+        "success": True,
+        "source_url": url,
+        "text": "\n".join(temp_lines),
+    }
+
+
+def transcribe_remote_media_url(url: str) -> Dict[str, Any]:
+    result = transcribe_remote_url(url)
+    return {
+        "success": True,
+        "provider": "dashscope",
+        "model": "paraformer-v2",
+        "remote_url": url,
+        "result": result,
+    }
+
+
 def transcribe_video(url_or_id: str, output_dir: Path, *, prefer_subtitles: bool = True, model_size: str = "small") -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     video_id = extract_video_id(url_or_id)
